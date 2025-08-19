@@ -86,6 +86,19 @@ class PaymentGroupTransaction extends AbstractHelper
     public function saveGroupTransaction($response)
     {
         $this->logging->addDebug(__METHOD__ . '|1|' . var_export($response, true));
+        
+        // CORE FIX: This method now only receives complete, valid data
+        // Validation moved to Giftcard/Response/Giftcard.php
+        
+        // Check for potential duplicates
+        if (!empty($response['Key'])) {
+            $existingTransaction = $this->getGroupTransactionByTrxId($response['Key']);
+            if (!empty($existingTransaction)) {
+                $this->logging->addDebug(__METHOD__ . '|DUPLICATE_WARNING|Transaction already exists: ' . $response['Key'] . ' - Skipping save');
+                return false;
+            }
+        }
+        
         $groupTransaction = $this->groupTransactionFactory->create();
         $data['order_id'] = $response['Invoice'];
         $data['transaction_id'] = $response['Key'];
@@ -259,5 +272,91 @@ class PaymentGroupTransaction extends AbstractHelper
             ['status' => $status],
             ['relatedtransaction = ?' => $groupTransactionId]
         );
+    }
+
+    /**
+     * Get VALID group transaction items (filters out empty records)
+     * PRODUCTION SAFE: Provides clean data without modifying database
+     *
+     * @param string $orderId
+     * @return array
+     */
+    public function getValidGroupTransactionItems($orderId)
+    {
+        $collection = $this->groupTransactionFactory->create()
+            ->getCollection()
+            ->addFieldToFilter('order_id', ['eq' => $orderId])
+            ->addFieldToFilter('status', ['eq' => '190'])
+            ->addFieldToFilter('transaction_id', ['notnull' => true])
+            ->addFieldToFilter('transaction_id', ['neq' => ''])
+            ->addFieldToFilter('servicecode', ['notnull' => true])
+            ->addFieldToFilter('servicecode', ['neq' => '']);
+
+        $items = array_values($collection->getItems());
+
+        return array_filter($items, function ($item) {
+            return $item['amount'] - (float)$item['refunded_amount'] > 0;
+        });
+    }
+
+    /**
+     * Get payment methods summary for an order (PRODUCTION SAFE)
+     * Combines group transaction data with additional_information as fallback
+     *
+     * @param string $orderId
+     * @return array
+     */
+    public function getPaymentMethodsSummary($orderId)
+    {
+        $result = [];
+        
+        // Try group transaction table first (filtered for valid records)
+        $groupTransactions = $this->getValidGroupTransactionItems($orderId);
+        if (!empty($groupTransactions)) {
+            foreach ($groupTransactions as $transaction) {
+                $result[] = [
+                    'method' => $transaction['servicecode'],
+                    'amount' => $transaction['amount'],
+                    'currency' => $transaction['currency'],
+                    'transaction_id' => $transaction['transaction_id'],
+                    'source' => 'group_transaction_table'
+                ];
+            }
+            return $result;
+        }
+
+        // Fallback to additional_information if group transaction table is empty/unreliable
+        try {
+            $objectManager = \Magento\Framework\App\ObjectManager::getInstance();
+            $orderRepository = $objectManager->get(\Magento\Sales\Api\OrderRepositoryInterface::class);
+            $searchCriteriaBuilder = $objectManager->get(\Magento\Framework\Api\SearchCriteriaBuilder::class);
+            
+            $searchCriteria = $searchCriteriaBuilder
+                ->addFilter('increment_id', $orderId)
+                ->create();
+                
+            $orders = $orderRepository->getList($searchCriteria);
+            if ($orders->getTotalCount() > 0) {
+                $order = $orders->getItems()[0];
+                $payment = $order->getPayment();
+                $additionalInfo = $payment->getAdditionalInformation();
+                
+                if (isset($additionalInfo['buckaroo_all_transactions'])) {
+                    foreach ($additionalInfo['buckaroo_all_transactions'] as $transactionId => $data) {
+                        $result[] = [
+                            'method' => $data[0] ?? 'unknown',
+                            'amount' => $data[1] ?? 0,
+                            'currency' => $order->getOrderCurrencyCode(),
+                            'transaction_id' => $transactionId,
+                            'source' => 'additional_information'
+                        ];
+                    }
+                }
+            }
+        } catch (\Exception $e) {
+            $this->logging->addError(__METHOD__ . '|Fallback failed: ' . $e->getMessage());
+        }
+
+        return $result;
     }
 }

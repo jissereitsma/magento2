@@ -97,7 +97,13 @@ class Giftcard
         $this->quote = $quote;
         $this->response = $response;
         if ($this->isSuccessful()) {
-            $this->saveGroupTransaction();
+            // CORE FIX: Only save group transaction if we have complete data
+            if ($this->hasCompleteGroupTransactionData()) {
+                error_log(__CLASS__ . '|CORE_FIX|Saving group transaction with complete data for order: ' . ($this->response['Invoice'] ?? 'unknown'));
+                $this->saveGroupTransaction();
+            }
+            // Note: We don't cancel the order for incomplete data - the payment is still successful
+            // The missing data just means we can't create a proper group transaction record
         } else {
             $this->cancelOrder();
         }
@@ -129,6 +135,32 @@ class Giftcard
     public function isSuccessful()
     {
         return isset($this->response['Status']['Code']['Code']) && $this->response['Status']['Code']['Code'] == '190';
+    }
+
+    /**
+     * Check if response has complete data for group transaction saving
+     * CORE FIX: Prevents saving incomplete group transactions
+     *
+     * @return bool
+     */
+    public function hasCompleteGroupTransactionData()
+    {
+        $requiredFields = ['Invoice', 'Key', 'ServiceCode', 'Currency', 'AmountDebit'];
+        $missingFields = [];
+        
+        foreach ($requiredFields as $field) {
+            if (empty($this->response[$field])) {
+                $missingFields[] = $field;
+            }
+        }
+        
+        if (!empty($missingFields)) {
+            // Log when we skip saving due to incomplete data
+            error_log(__CLASS__ . '|CORE_FIX|Skipping group transaction save - missing fields: ' . implode(', ', $missingFields));
+            return false;
+        }
+        
+        return true;
     }
     /**
      * Get reminder amount

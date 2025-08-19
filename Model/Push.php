@@ -511,6 +511,13 @@ class Push implements PushInterface
 
         $response = $this->validator->validateStatusCode($postDataStatusCode);
 
+        // CORE FIX: For giftcard group transactions, build complete response from push data
+        if ($this->isGiftcardGroupTransaction()) {
+            $completeResponse = $this->validator->buildCompleteResponseFromPushData($this->postData, $this->order);
+            $this->logging->addDebug(__METHOD__ . '|CORE_FIX|Built complete response for giftcard group transaction: ' . var_export($completeResponse, true));
+            $response = $completeResponse;
+        }
+
         //Check if the push have PayLink
         $this->receivePushCheckPayLink($response, $validSignature);
 
@@ -2454,5 +2461,31 @@ class Push implements PushInterface
                 'brq_statuscode',
                 $this->helper->getStatusCode('BUCKAROO_MAGENTO2_STATUSCODE_CANCELLED_BY_USER')
             );
+    }
+
+    /**
+     * CORE FIX: Check if this is a giftcard group transaction push
+     * This helps us identify when we need complete response data
+     *
+     * @return bool
+     */
+    private function isGiftcardGroupTransaction()
+    {
+        $payment = $this->order->getPayment();
+        
+        // Check if it's a giftcard payment method
+        $isGiftcardPayment = ($payment && $payment->getMethod() === \Buckaroo\Magento2\Model\Method\Giftcards::PAYMENT_METHOD_CODE);
+        
+        // Check if we have giftcard transaction indicators in push data
+        $hasGiftcardData = !empty($this->postData['brq_transaction_method']) && 
+                          (strpos($this->postData['brq_transaction_method'], 'giftcard') !== false || 
+                           strpos($this->postData['brq_transaction_method'], 'voucher') !== false ||
+                           strpos($this->postData['brq_transaction_method'], 'bon') !== false);
+        
+        // Check if it's related to group/partial payments
+        $hasGroupTransactionData = !empty($this->postData['brq_relatedtransaction_partialpayment']) || 
+                                  !empty($this->postData['brq_invoicenumber']);
+        
+        return ($isGiftcardPayment || $hasGiftcardData) && $hasGroupTransactionData;
     }
 }

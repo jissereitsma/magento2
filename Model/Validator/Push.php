@@ -110,6 +110,69 @@ class Push implements ValidatorInterface
     }
 
     /**
+     * CORE FIX: Build complete response from push data for group transactions
+     * This ensures we have all required fields for proper group transaction saving
+     *
+     * @param array $postData Push notification data
+     * @param \Magento\Sales\Model\Order $order Order object for currency info
+     * @return array Complete response format compatible with API responses
+     */
+    public function buildCompleteResponseFromPushData($postData, $order)
+    {
+        // Start with basic status validation
+        $statusCode = $postData['brq_statuscode'] ?? null;
+        $baseResponse = $this->validateStatusCode($statusCode);
+        
+        // Only build complete response for successful transactions
+        if ($statusCode != 190) {
+            return $baseResponse;
+        }
+        
+        // Build complete response with all required fields for group transactions
+        $completeResponse = $baseResponse;
+        
+        // Map push data fields to API response format
+        if (!empty($postData['brq_invoicenumber'])) {
+            $completeResponse['Invoice'] = $postData['brq_invoicenumber'];
+        }
+        
+        if (!empty($postData['brq_transactions'])) {
+            $completeResponse['Key'] = $postData['brq_transactions'];
+        }
+        
+        if (!empty($postData['brq_transaction_method'])) {
+            $completeResponse['ServiceCode'] = $postData['brq_transaction_method'];
+        }
+        
+        if (!empty($postData['brq_amount'])) {
+            $completeResponse['AmountDebit'] = $postData['brq_amount'];
+        }
+        
+        // Add currency from order
+        if ($order && $order->getOrderCurrencyCode()) {
+            $completeResponse['Currency'] = $order->getOrderCurrencyCode();
+        }
+        
+        // Add proper status structure to match API response format
+        $completeResponse['Status'] = [
+            'Code' => [
+                'Code' => $statusCode
+            ]
+        ];
+        
+        // Add group transaction info if available
+        if (!empty($postData['brq_relatedtransaction_partialpayment'])) {
+            $completeResponse['RequiredAction'] = [
+                'PayRemainderDetails' => [
+                    'GroupTransaction' => $postData['brq_relatedtransaction_partialpayment']
+                ]
+            ];
+        }
+        
+        return $completeResponse;
+    }
+
+    /**
      * Generate/calculate the signature with the buckaroo config value and check if thats equal to the signature
      * received from the push
      *
